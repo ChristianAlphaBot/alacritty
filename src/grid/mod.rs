@@ -135,6 +135,16 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// Cumulative count of lines rotated toward history by FULL-buffer
+    /// scrolls (cipher patch: the saturation-immune scroll-off anchor for
+    /// remote-control capture). Monotonic for the grid's lifetime: unaffected
+    /// by resize rewrap (rebuilds rows without scrolling), by clear (erases
+    /// rows, never the count of lines that transited), and by the
+    /// scroll-limit clamp (at saturation lines still transit, displacing the
+    /// oldest — exactly the regime a history_size-based anchor goes blind in).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    lines_scrolled_into_history: u64,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -147,6 +157,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            lines_scrolled_into_history: 0,
         }
     }
 
@@ -272,6 +283,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         if region.start == 0 {
             // Create scrollback for the new lines.
             self.increase_scroll_limit(positions);
+
+            // cipher patch: count every line rotated toward history,
+            // regardless of the scroll-limit clamp above.
+            self.lines_scrolled_into_history += positions as u64;
 
             // Swap the lines fixed at the top to their target positions after rotation.
             //
@@ -419,6 +434,13 @@ impl<T> Grid<T> {
     /// This is slightly more optimized than calling `Grid::iter_from` in combination with
     /// `Iterator::take_while`.
     #[inline]
+    /// Cumulative lines rotated out of the visible region by full-buffer
+    /// scrolls (cipher patch; see the field). For grids with zero history
+    /// this still counts rotations (lines recycled rather than stored).
+    pub fn lines_scrolled_into_history(&self) -> u64 {
+        self.lines_scrolled_into_history
+    }
+
     pub fn display_iter(&self) -> GridIterator<'_, T> {
         let last_column = self.last_column();
         let start = Point::new(Line(-(self.display_offset() as i32) - 1), last_column);
