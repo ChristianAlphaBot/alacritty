@@ -3,7 +3,7 @@
 use std::ffi::CStr;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result};
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::os::fd::OwnedFd;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -12,7 +12,8 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::Arc;
-use std::{env, ptr};
+use std::time::{Duration, Instant};
+use std::{env, ptr, thread};
 
 use libc::{F_GETFL, F_SETFL, O_NONBLOCK, TIOCSCTTY, c_int, fcntl};
 use log::error;
@@ -100,9 +101,13 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Result<Passwd<'_>> {
     })
 }
 
+/// How long a dropped [`Pty`]'s child has to exit after its hangup before it is killed.
+const HANGUP_GRACE: Duration = Duration::from_secs(3);
+
 pub struct Pty {
     child: Child,
-    file: File,
+    /// The master. Dropped by hand in [`Pty`]'s drop, before the child is waited for.
+    file: ManuallyDrop<File>,
     signals: UnixStream,
     sig_id: SigId,
 }
@@ -290,7 +295,7 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
                 set_nonblocking(master_fd);
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            Ok(Pty { child, file: ManuallyDrop::new(File::from(master)), signals, sig_id })
         },
         Err(err) => Err(Error::new(
             err.kind(),
@@ -305,14 +310,34 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // Make sure the PTY is terminated properly.
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGHUP);
+        // Hang the session up as a closed terminal does: SIGHUP to the child, then close the
+        // master, so the shell and its foreground job see the hangup too. The wait comes last and
+        // is bounded. macOS's `/usr/bin/login` ignores SIGHUP while the master is open, so waiting
+        // before the close never returned: the thread blocked for good, and login, the shell and
+        // any program under it kept running (cipher, 2026-10-02). A child still alive after
+        // `HANGUP_GRACE` is killed and reaped, so a drop never holds its thread. A child that has
+        // exited already is not signalled: once reaped, its pid may name another process.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            unsafe {
+                libc::kill(self.child.id() as i32, libc::SIGHUP);
+            }
         }
 
         // Clear signal-hook handler.
         unregister_signal(self.sig_id);
 
+        // SAFETY: the master's only drop; nothing reads or writes it after this.
+        unsafe { ManuallyDrop::drop(&mut self.file) };
+
+        let deadline = Instant::now() + HANGUP_GRACE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if Instant::now() >= deadline => break,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
@@ -330,7 +355,7 @@ impl EventedReadWrite for Pty {
     ) -> Result<()> {
         interest.key = PTY_READ_WRITE_TOKEN;
         unsafe {
-            poll.add_with_mode(&self.file, interest, poll_opts)?;
+            poll.add_with_mode(&*self.file, interest, poll_opts)?;
         }
 
         unsafe {
@@ -350,7 +375,7 @@ impl EventedReadWrite for Pty {
         poll_opts: PollMode,
     ) -> Result<()> {
         interest.key = PTY_READ_WRITE_TOKEN;
-        poll.modify_with_mode(&self.file, interest, poll_opts)?;
+        poll.modify_with_mode(&*self.file, interest, poll_opts)?;
 
         poll.modify_with_mode(
             &self.signals,
@@ -361,7 +386,7 @@ impl EventedReadWrite for Pty {
 
     #[inline]
     fn deregister(&mut self, poll: &Arc<Poller>) -> Result<()> {
-        poll.delete(&self.file)?;
+        poll.delete(&*self.file)?;
         poll.delete(&self.signals)
     }
 
