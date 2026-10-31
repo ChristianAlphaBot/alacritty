@@ -20,8 +20,12 @@ use crate::term::Term;
 use crate::{thread, tty};
 use vte::ansi;
 
-/// Max bytes to read from the PTY before forced terminal synchronization.
-pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
+/// Max bytes to read from the PTY before forced terminal synchronization: the reader's buffer, on
+/// its thread's stack, zeroed when the thread starts. A read is parsed as soon as it lands unless
+/// another thread holds the terminal, so the buffer only keeps what arrives during that hold, and
+/// one locked stretch parses at most [`MAX_LOCKED_READ`] anyway. At 1 MiB a reader, Cipher Next's
+/// terminal per agent held 151 MiB of it on its founder's Mac (2026-10-31).
+pub(crate) const READ_BUFFER_SIZE: usize = 0x1_0000;
 
 /// Max bytes to read from the PTY while the terminal is locked.
 const MAX_LOCKED_READ: usize = u16::MAX as usize;
