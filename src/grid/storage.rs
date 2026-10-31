@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use super::Row;
 use crate::index::Line;
 
-/// Maximum number of buffered lines outside of the grid for performance optimization.
-const MAX_CACHE_SIZE: usize = 1_000;
+/// Maximum number of buffered lines outside of the grid for performance optimization: history grows
+/// by this many rows at a time, each a full row of cells, so it is what a terminal's first scroll
+/// costs. Cipher Next keeps a terminal per agent (151 on its founder's Mac, 2026-10-31): at 1,000
+/// rows of 150 columns, 24 bytes a cell, that was 3.6 MB each before a line of history was kept.
+const MAX_CACHE_SIZE: usize = 100;
 
 /// A ring buffer for optimizing indexing and rotation.
 ///
