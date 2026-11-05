@@ -651,6 +651,15 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
+    /// The size of the grid not shown, as `(total_lines, columns)`: its history and its screen.
+    ///
+    /// While the alternate screen shows, this is the primary screen's grid, which keeps its
+    /// scrollback; otherwise it is the alternate screen's, which keeps none. Sizes only, so a
+    /// memory count can read what a terminal holds without reaching its cells.
+    pub fn inactive_grid_size(&self) -> (usize, usize) {
+        (self.inactive_grid.total_lines(), self.inactive_grid.columns())
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize<S: Dimensions>(&mut self, size: S) {
         let old_cols = self.columns();
