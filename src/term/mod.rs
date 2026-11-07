@@ -660,6 +660,13 @@ impl<T> Term<T> {
         (self.inactive_grid.total_lines(), self.inactive_grid.columns())
     }
 
+    /// The grid not shown, read-only: while the alternate screen shows, the primary screen's grid
+    /// and all its scrollback; otherwise the alternate screen's. A memory count reads how much of
+    /// each row it holds is used through it, and can change nothing.
+    pub fn inactive_grid(&self) -> &Grid<Cell> {
+        &self.inactive_grid
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize<S: Dimensions>(&mut self, size: S) {
         let old_cols = self.columns();
