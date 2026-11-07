@@ -531,3 +531,34 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+// cipher patch: a blank tail is only cells exactly equal to the default one. A tab mark, a bold
+// space and a hyperlinked space, which `is_empty` calls blank, are kept past a row's last letter,
+// and every cell reads back as written.
+#[test]
+fn a_tail_keeps_every_cell_that_is_not_the_default_one() {
+    use crate::term::cell::Hyperlink;
+
+    let tab = cell('\t');
+    let bold = Cell { flags: Flags::BOLD, ..Cell::default() };
+    let mut linked = Cell::default();
+    linked.set_hyperlink(Some(Hyperlink::new(None::<String>, String::from("https://example.com"))));
+    let written = [(0, cell('a')), (2, tab), (10, bold), (20, linked)];
+    assert!(written[1..].iter().all(|(_, cell)| cell.is_empty()), "blank to `is_empty`");
+
+    let mut grid = Grid::<Cell>::new(3, 40, 4);
+    for (column, cell) in &written {
+        grid[Line(0)][Column(*column)] = cell.clone();
+    }
+    // The top line is the one a scroll takes into history.
+    grid.scroll_up::<Color>(&(Line(0)..Line(3)), 1);
+    let row = &grid[Line(-1)];
+    assert_eq!((row.len(), row.stored()), (40, 21), "kept up to the hyperlinked space");
+    for column in 0..40 {
+        let expect = written
+            .iter()
+            .find(|(at, _)| *at == column)
+            .map_or_else(Cell::default, |(_, cell)| cell.clone());
+        assert_eq!(row[Column(column)], expect, "{column}");
+    }
+}
