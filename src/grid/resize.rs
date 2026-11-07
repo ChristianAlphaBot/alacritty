@@ -16,6 +16,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        // cipher patch: the reflow below reads and splits every row by its cells, so every row is
+        // whole while it runs, and history is compact again after it.
+        let resized = self.lines != lines || self.columns != columns;
+        if resized {
+            self.raw.expand_all();
+        }
+
         // Use empty template cell for resetting cells due to resize.
         let template = mem::take(&mut self.cursor.template);
 
@@ -33,6 +40,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Restore template cell.
         self.cursor.template = template;
+
+        if resized {
+            self.compact_history(self.history_size());
+        }
     }
 
     /// Add lines to the visible area.

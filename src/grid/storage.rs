@@ -1,12 +1,11 @@
 use std::cmp::max;
 use std::mem;
-use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::Row;
+use super::{GridCell, Row};
 use crate::index::Line;
 
 /// Maximum number of buffered lines outside of the grid for performance optimization: history grows
@@ -55,7 +54,7 @@ pub struct Storage<T> {
     len: usize,
 }
 
-impl<T: PartialEq> PartialEq for Storage<T> {
+impl<T: GridCell + PartialEq> PartialEq for Storage<T> {
     fn eq(&self, other: &Self) -> bool {
         // Both storage buffers need to be truncated and zeroed.
         assert_eq!(self.zero, 0);
@@ -145,37 +144,14 @@ impl<T> Storage<T> {
         self.len
     }
 
-    /// Swap implementation for Row<T>.
+    /// Swap two rows.
     ///
-    /// Exploits the known size of Row<T> to produce a slightly more efficient
-    /// swap than going through slice::swap.
-    ///
-    /// The default implementation from swap generates 8 movups and 4 movaps
-    /// instructions. This implementation achieves the swap in only 8 movups
-    /// instructions.
+    /// cipher patch: the slice's own swap. Upstream copied a row as exactly four words, unsafe
+    /// and checked only in debug builds; a compact row's `tail` makes it five.
     pub fn swap(&mut self, a: Line, b: Line) {
-        debug_assert_eq!(mem::size_of::<Row<T>>(), mem::size_of::<usize>() * 4);
-
         let a = self.compute_index(a);
         let b = self.compute_index(b);
-
-        unsafe {
-            // Cast to a qword array to opt out of copy restrictions and avoid
-            // drop hazards. Byte array is no good here since for whatever
-            // reason LLVM won't optimized it.
-            let a_ptr = self.inner.as_mut_ptr().add(a) as *mut MaybeUninit<usize>;
-            let b_ptr = self.inner.as_mut_ptr().add(b) as *mut MaybeUninit<usize>;
-
-            // Copy 1 qword at a time.
-            //
-            // The optimizer unrolls this loop and vectorizes it.
-            let mut tmp: MaybeUninit<usize>;
-            for i in 0..4 {
-                tmp = *a_ptr.offset(i);
-                *a_ptr.offset(i) = *b_ptr.offset(i);
-                *b_ptr.offset(i) = tmp;
-            }
-        }
+        self.inner.swap(a, b);
     }
 
     /// Rotate the grid, moving all lines up/down in history.
@@ -203,6 +179,16 @@ impl<T> Storage<T> {
         self.len = vec.len();
         self.inner = vec;
         self.zero = 0;
+    }
+
+    /// cipher patch: every row whole again ([`Row::expand`]), the rows kept past the grid's too.
+    pub fn expand_all(&mut self)
+    where
+        T: GridCell,
+    {
+        for row in &mut self.inner {
+            row.expand();
+        }
     }
 
     /// Remove all rows from storage.
@@ -277,6 +263,10 @@ mod tests {
     impl GridCell for char {
         fn is_empty(&self) -> bool {
             *self == ' ' || *self == '\t'
+        }
+
+        fn blank() -> &'static Self {
+            &'\0'
         }
 
         fn reset(&mut self, template: &Self) {

@@ -3,10 +3,15 @@
 use super::*;
 
 use crate::term::cell::Cell;
+use crate::vte::ansi::Color;
 
 impl GridCell for usize {
     fn is_empty(&self) -> bool {
         *self == 0
+    }
+
+    fn blank() -> &'static Self {
+        &0
     }
 
     fn reset(&mut self, template: &Self) {
@@ -346,6 +351,116 @@ fn shrink_reflow_disabled() {
     assert_eq!(grid[Line(0)].len(), 2);
     assert_eq!(grid[Line(0)][Column(0)], cell('1'));
     assert_eq!(grid[Line(0)][Column(1)], cell('2'));
+}
+
+/// cipher patch: a grid of 40 columns with 16 rows of history, 13 of them written: the `i`th
+/// written holds `i + 1` in its first `i * 3` cells and blanks after, between blank rows.
+fn history_of_rows() -> Grid<usize> {
+    let mut grid = Grid::<usize>::new(3, 40, 20);
+    for i in 0..13 {
+        let line = Line(2);
+        for column in 0..(i * 3).min(40) {
+            grid[line][Column(column)] = i + 1;
+        }
+        grid.scroll_up::<usize>(&(Line(0)..Line(3)), 1);
+    }
+    grid.scroll_up::<usize>(&(Line(0)..Line(3)), 3);
+    grid
+}
+
+/// The cell `history_of_rows` wrote at `column` of the history row `back` rows up: the newest
+/// is a blank row, then the 13 written ones, newest first, then the two rows it started with.
+fn written(back: usize, column: usize) -> usize {
+    match back {
+        2..=14 if column < (14 - back) * 3 => 15 - back,
+        _ => 0,
+    }
+}
+
+// cipher patch: a row entering history keeps no blank tail of 16 cells or more in memory, and
+// every read of it is as before: by column, by iterating it, its last cell, its width.
+#[test]
+fn history_rows_drop_their_blank_tail() {
+    let grid = history_of_rows();
+    assert_eq!(grid.history_size(), 16);
+    for back in 1..=16 {
+        let row = &grid[Line(-(back as i32))];
+        assert_eq!(row.len(), 40);
+        let used = (0..40).filter(|&column| written(back, column) != 0).count();
+        let kept = if 40 - used >= 16 { used } else { 40 };
+        assert_eq!(row.stored(), kept, "{back} rows up");
+        for column in 0..40 {
+            assert_eq!(row[Column(column)], written(back, column), "{back} rows up, {column}");
+        }
+        let cells: Vec<usize> = row.into_iter().copied().collect();
+        assert_eq!(cells, (0..40).map(|column| written(back, column)).collect::<Vec<_>>());
+        assert_eq!(row.last().copied(), Some(written(back, 39)));
+        assert_eq!(row.is_clear(), used == 0);
+        let mut whole = row.clone();
+        whole.expand();
+        assert_eq!(whole.stored(), 40);
+        assert_eq!(&whole, row, "a compact row equals itself whole");
+    }
+}
+
+// cipher patch: a write into a compact row stores its whole width again first.
+#[test]
+fn a_write_into_a_compact_row_stores_it_whole() {
+    let mut grid = history_of_rows();
+    let line = Line(-10);
+    assert!(grid[line].stored() < 40);
+    grid[line][Column(30)] = 99;
+    assert_eq!(grid[line].stored(), 40);
+    for column in 0..40 {
+        let expect = if column == 30 { 99 } else { written(10, column) };
+        assert_eq!(grid[line][Column(column)], expect, "{column}");
+    }
+}
+
+// cipher patch: a resize reflows a compact history exactly as the same history whole, and leaves
+// it compact again: lines of letters, every fourth one full and wrapped onto the next.
+#[test]
+fn resize_reflows_a_compact_history_as_a_whole_one() {
+    let history = || {
+        let mut grid = Grid::<Cell>::new(3, 40, 20);
+        for i in 0..13 {
+            let letter = (b'a' + i as u8) as char;
+            let used = if i % 4 == 0 { 40 } else { i * 3 };
+            for column in 0..used {
+                grid[Line(2)][Column(column)] = cell(letter);
+            }
+            if used == 40 {
+                grid[Line(2)][Column(39)] = wrap_cell(letter);
+            }
+            grid.scroll_up::<Color>(&(Line(0)..Line(3)), 1);
+        }
+        grid.scroll_up::<Color>(&(Line(0)..Line(3)), 3);
+        grid
+    };
+    for (lines, columns) in [(3, 25), (5, 60), (2, 17), (3, 40)] {
+        let mut compact = history();
+        assert!(compact[Line(-7)].stored() < 40, "the history starts compact");
+        let mut whole = history();
+        whole.raw.expand_all();
+        compact.resize::<Color>(true, lines, columns);
+        whole.resize::<Color>(true, lines, columns);
+        assert_eq!(compact.history_size(), whole.history_size(), "{lines} × {columns}");
+        let top = -(compact.history_size() as i32);
+        for line in top..compact.screen_lines() as i32 {
+            let (a, b) = (&compact[Line(line)], &whole[Line(line)]);
+            assert_eq!(a.len(), b.len());
+            for column in 0..a.len() {
+                assert_eq!(a[Column(column)], b[Column(column)], "{lines} × {columns} {line}");
+            }
+        }
+        assert!(
+            (1..=compact.history_size()).any(|back| {
+                let row = &compact[Line(-(back as i32))];
+                row.stored() < row.len()
+            }),
+            "{lines} × {columns}: history is compact again"
+        );
+    }
 }
 
 #[test]

@@ -19,9 +19,13 @@ mod tests;
 pub use self::row::Row;
 use self::storage::Storage;
 
-pub trait GridCell: Sized {
+pub trait GridCell: Sized + Clone + 'static {
     /// Check if the cell contains any content.
     fn is_empty(&self) -> bool;
+
+    /// cipher patch: the cell a compact row does not store ([`Row::compact`]), a fresh row's: a
+    /// read past what a row stores is this one.
+    fn blank() -> &'static Self;
 
     /// Perform an opinionated cell reset based on a template cell.
     fn reset(&mut self, template: &Self);
@@ -183,6 +187,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         };
     }
 
+    /// cipher patch: the newest `count` lines of history, compact ([`Row::compact`]).
+    fn compact_history(&mut self, count: usize) {
+        for back in 1..=count {
+            self.raw[Line(-(back as i32))].compact();
+        }
+    }
+
     fn increase_scroll_limit(&mut self, count: usize) {
         let count = min(count, self.max_scroll_limit - self.history_size());
         if count != 0 {
@@ -308,6 +319,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             for i in (region.end.0..screen_lines).rev().map(Line::from) {
                 self.raw.swap(i, i - positions);
             }
+
+            // cipher patch: the lines that just entered history keep no blank tail in memory.
+            self.compact_history(min(positions, self.history_size()));
         } else {
             // Rotate lines without moving anything into history.
             for i in (region.start.0..region.end.0 - positions as i32).map(Line::from) {
@@ -456,13 +470,16 @@ impl<T> Grid<T> {
     }
 
     #[inline]
-    pub fn cursor_cell(&mut self) -> &mut T {
+    pub fn cursor_cell(&mut self) -> &mut T
+    where
+        T: GridCell,
+    {
         let point = self.cursor.point;
         &mut self[point.line][point.column]
     }
 }
 
-impl<T: PartialEq> PartialEq for Grid<T> {
+impl<T: GridCell + PartialEq> PartialEq for Grid<T> {
     fn eq(&self, other: &Self) -> bool {
         // Compare struct fields and check result of grid comparison.
         self.raw.eq(&other.raw)
@@ -488,7 +505,7 @@ impl<T> IndexMut<Line> for Grid<T> {
     }
 }
 
-impl<T> Index<Point> for Grid<T> {
+impl<T: GridCell> Index<Point> for Grid<T> {
     type Output = T;
 
     #[inline]
@@ -497,7 +514,7 @@ impl<T> Index<Point> for Grid<T> {
     }
 }
 
-impl<T> IndexMut<Point> for Grid<T> {
+impl<T: GridCell> IndexMut<Point> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, point: Point) -> &mut T {
         &mut self[point.line][point.column]
@@ -599,7 +616,7 @@ pub struct GridIterator<'a, T> {
     end: Point,
 }
 
-impl<'a, T> GridIterator<'a, T> {
+impl<'a, T: GridCell> GridIterator<'a, T> {
     /// Current iterator position.
     pub fn point(&self) -> Point {
         self.point
@@ -611,7 +628,7 @@ impl<'a, T> GridIterator<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for GridIterator<'a, T> {
+impl<'a, T: GridCell> Iterator for GridIterator<'a, T> {
     type Item = Indexed<&'a T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -655,7 +672,7 @@ pub trait BidirectionalIterator: Iterator {
     fn prev(&mut self) -> Option<Self::Item>;
 }
 
-impl<T> BidirectionalIterator for GridIterator<'_, T> {
+impl<T: GridCell> BidirectionalIterator for GridIterator<'_, T> {
     fn prev(&mut self) -> Option<Self::Item> {
         let topmost_line = self.grid.topmost_line();
         let last_column = self.grid.last_column();

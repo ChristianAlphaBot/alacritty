@@ -221,7 +221,21 @@ impl Cell {
     }
 }
 
+/// cipher patch: a fresh row's cell, [`Cell::default`], for [`GridCell::blank`].
+static BLANK: Cell = Cell {
+    c: ' ',
+    bg: Color::Named(NamedColor::Background),
+    fg: Color::Named(NamedColor::Foreground),
+    flags: Flags::empty(),
+    extra: None,
+};
+
 impl GridCell for Cell {
+    #[inline]
+    fn blank() -> &'static Self {
+        &BLANK
+    }
+
     #[inline]
     fn is_empty(&self) -> bool {
         (self.c == ' ' || self.c == '\t')
@@ -275,7 +289,8 @@ impl LineLength for grid::Row<Cell> {
             return Column(self.len());
         }
 
-        for (index, cell) in self[..].iter().rev().enumerate() {
+        // cipher patch: every cell, a compact row's blank tail too ([`grid::Row::compact`]).
+        for (index, cell) in self.into_iter().rev().enumerate() {
             if cell.c != ' '
                 || cell.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) == Some(false)
             {
@@ -311,6 +326,19 @@ mod tests {
         let mut row = Row::<Cell>::new(10);
         row[Column(5)].c = 'a';
 
+        assert_eq!(row.line_length(), Column(6));
+    }
+
+    // cipher patch: a compact row's length is its whole copy's.
+    #[test]
+    fn line_length_reads_a_compact_row_whole() {
+        let mut row = Row::<Cell>::new(40);
+        row[Column(5)].c = 'a';
+        row[Column(6)].extra = Some(Default::default());
+        let whole = row.clone();
+        row.compact();
+        assert!(row.stored() < 40);
+        assert_eq!(row.line_length(), whole.line_length());
         assert_eq!(row.line_length(), Column(6));
     }
 
