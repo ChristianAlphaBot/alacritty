@@ -1,6 +1,7 @@
 //! A specialized 2D grid implementation optimized for use in a terminal.
 
 use std::cmp::{max, min};
+use std::mem;
 use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
 
 #[cfg(feature = "serde")]
@@ -320,8 +321,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 self.raw.swap(i, i - positions);
             }
 
-            // cipher patch: the lines that just entered history keep no blank tail in memory.
-            self.compact_history(min(positions, self.history_size()));
+            // cipher patch: the lines that just entered history keep no blank tail in memory, each
+            // handing its whole buffer to a line about to be reset at the region's foot.
+            for back in 0..min(positions, self.history_size()) {
+                let foot = Line(region.end.0 - positions as i32 + back as i32);
+                let mut next = mem::take(&mut self.raw[foot]);
+                self.raw[Line(-(back as i32) - 1)].compact_into(&mut next);
+                self.raw[foot] = next;
+            }
         } else {
             // Rotate lines without moving anything into history.
             for i in (region.start.0..region.end.0 - positions as i32).map(Line::from) {

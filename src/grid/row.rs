@@ -3,7 +3,7 @@
 use std::cmp::{max, min};
 use std::iter::{self, Chain, RepeatN};
 use std::ops::{Index, IndexMut, Range, RangeFrom, RangeFull, RangeTo, RangeToInclusive};
-use std::{ptr, slice};
+use std::{mem, ptr, slice};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -162,20 +162,51 @@ impl<T: GridCell> Row<T> {
     where
         T: PartialEq,
     {
-        let blank = T::blank();
-        let kept = self.inner.iter().rposition(|cell| cell != blank).map_or(0, |last| last + 1);
-        if self.inner.len() - kept < COMPACT_LEAST {
-            return;
-        }
+        let Some(kept) = self.compactable() else { return };
 
-        // A buffer of its own size, and the whole one freed: the next row the terminal writes
-        // to is a whole row again, and takes it.
+        // A buffer of its own size, and the whole one freed.
         let mut cells = Vec::with_capacity(kept);
         cells.extend(self.inner.drain(..kept));
         self.tail += self.inner.len();
         self.inner = cells;
         // Every cell past what it stores is the blank.
         self.occ = min(self.occ, kept);
+    }
+
+    /// cipher patch: [`Row::compact`], handing this row's whole buffer, its cells as they were,
+    /// to `next`: a compact row as wide, recycled from the oldest history for the terminal to
+    /// reset and write to next. So a full history takes a line in without allocating a whole
+    /// row. Its `occ` goes with the buffer, which its reset reads as upstream's reads any row's.
+    pub fn compact_into(&mut self, next: &mut Row<T>)
+    where
+        T: PartialEq,
+    {
+        let Some(kept) = self.compactable() else { return };
+
+        let cells = self.inner[..kept].to_vec();
+        let whole = mem::replace(&mut self.inner, cells);
+        let len = whole.len();
+        if next.tail != 0 && next.len() == len {
+            next.inner = whole;
+            next.tail = 0;
+            next.occ = self.occ;
+        }
+        self.tail = len - kept;
+        self.occ = min(self.occ, kept);
+    }
+
+    /// The cells a compact row would keep, when it would drop at least [`COMPACT_LEAST`]: every
+    /// cell up to its last that is not the blank, each read from its end.
+    fn compactable(&self) -> Option<usize>
+    where
+        T: PartialEq,
+    {
+        if self.tail != 0 {
+            return None;
+        }
+        let blank = T::blank();
+        let kept = self.inner.iter().rposition(|cell| cell != blank).map_or(0, |last| last + 1);
+        (self.inner.len() - kept >= COMPACT_LEAST).then_some(kept)
     }
 
     /// cipher patch: store a compact row's blank tail again, so every cell of it can be written.
@@ -265,12 +296,17 @@ impl<T: GridCell> Index<Column> for Row<T> {
     fn index(&self, index: Column) -> &T {
         match self.inner.get(index.0) {
             Some(cell) => cell,
-            None => {
-                assert!(index.0 < self.len(), "column {} of a row {} wide", index.0, self.len());
-                T::blank()
-            },
+            // A compact row's blank tail; past its width, a panic as an index out of bounds was.
+            None if index.0 < self.len() => T::blank(),
+            None => out_of_bounds(index.0, self.len()),
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn out_of_bounds(column: usize, len: usize) -> ! {
+    panic!("column {column} of a row {len} wide")
 }
 
 impl<T: GridCell> IndexMut<Column> for Row<T> {

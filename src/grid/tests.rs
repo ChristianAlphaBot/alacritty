@@ -403,6 +403,34 @@ fn history_rows_drop_their_blank_tail() {
     }
 }
 
+// cipher patch: a full history takes each line in as before, the line entering it handing its
+// whole buffer to the one recycled at the foot, which is reset blank before it is written.
+#[test]
+fn a_full_history_takes_lines_in_as_before() {
+    let mut grid = Grid::<usize>::new(3, 40, 4);
+    for i in 0..30 {
+        let used = (i * 7) % 41;
+        assert!((0..40).all(|column| grid[Line(2)][Column(column)] == 0), "a blank foot at {i}");
+        for column in 0..used {
+            grid[Line(2)][Column(column)] = i + 1;
+        }
+        grid.scroll_up::<usize>(&(Line(0)..Line(3)), 1);
+    }
+    assert_eq!(grid.history_size(), 4);
+    // Lines 0 to 29 went in, two lines behind the foot: the newest in history is line 27.
+    for back in 1..=4 {
+        let i = 28 - back;
+        let used = (i * 7) % 41;
+        let row = &grid[Line(-(back as i32))];
+        assert_eq!(row.len(), 40);
+        for column in 0..40 {
+            let expect = if column < used { i + 1 } else { 0 };
+            assert_eq!(row[Column(column)], expect, "line {i}, {column}");
+        }
+        assert_eq!(row.stored() < 40, 40 - used >= 16, "line {i} is compact when it can be");
+    }
+}
+
 // cipher patch: a write into a compact row stores its whole width again first.
 #[test]
 fn a_write_into_a_compact_row_stores_it_whole() {
